@@ -656,7 +656,7 @@ class SwinTransformer(nn.Module):
                                                   f'specify `Pretrained` in ' \
                                                   f'`init_cfg` in ' \
                                                   f'{self.__class__.__name__} '
-            ckpt = torch.load(self.init_cfg.checkpoint, map_location='cpu')
+            ckpt = torch.load(self.init_cfg.checkpoint, map_location='cpu', weights_only=False)
             if 'state_dict' in ckpt:
                 _state_dict = ckpt['state_dict']
             elif 'model' in ckpt:

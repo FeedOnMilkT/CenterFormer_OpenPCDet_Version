@@ -65,7 +65,7 @@ class SegTemplate(nn.Module):
                 hub.load_state_dict_from_url(url, save_dir)
 
             # Get pretrained state dict
-            pretrained_dict = torch.load(self.pretrained_path)
+            pretrained_dict = torch.load(self.pretrained_path, weights_only=False)
             #pretrained_dict = self.filter_pretrained_dict(model_dict=model_dict, pretrained_dict=pretrained_dict)
 
             # Update current model state dict
