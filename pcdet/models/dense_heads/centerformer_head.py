@@ -111,6 +111,149 @@ class CenterFormerDecoderLayer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Deformable cross-attention (CenterFormer deformable variant)
+# ---------------------------------------------------------------------------
+
+class DeformableCrossAttention(nn.Module):
+    """Deformable cross-attention for CenterFormer.
+
+    Replaces the fixed 3×3 window sampling with n_pts learned offset points
+    per scale.  Attention weights are predicted from the query (Deformable DETR
+    style) rather than computed by dot-product, avoiding O((S·K)²) cost.
+
+    Reference: Zhu et al., "Deformable DETR", ICLR 2021 §3.2
+    Paper deformable config: K=15 per scale, n_scales=3, 2 layers, 6 heads.
+    """
+
+    def __init__(self, d_model: int, n_heads: int,
+                 n_scales: int = 3, n_pts: int = 15, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.n_heads  = n_heads
+        self.n_scales = n_scales
+        self.n_pts    = n_pts
+        self.head_dim = d_model // n_heads
+
+        # (dx, dy) offset per (scale, point) pair, predicted from each query
+        self.offset_net = nn.Linear(d_model, n_scales * n_pts * 2)
+        # Scalar attention weight per (head, scale, point)
+        self.attn_net   = nn.Linear(d_model, n_heads * n_scales * n_pts)
+        # Final output projection
+        self.out_proj   = nn.Linear(d_model, d_model)
+        self.drop       = nn.Dropout(dropout)
+
+        # Zero-init offsets: at init all sampling points collapse to reference
+        nn.init.zeros_(self.offset_net.weight)
+        nn.init.zeros_(self.offset_net.bias)
+        nn.init.zeros_(self.attn_net.bias)
+
+    def forward(self, query: torch.Tensor, query_pos: torch.Tensor,
+                reference_pts: torch.Tensor,
+                scales: list, kv_proj_list: nn.ModuleList) -> torch.Tensor:
+        """
+        Args:
+            query:         (B, N, D)
+            query_pos:     (B, N, D)
+            reference_pts: (B, N, 2)  grid_sample normalized coords [-1, 1]
+            scales:        list of S (B, C, H_s, W_s) BEV feature maps
+            kv_proj_list:  nn.ModuleList of S Linear(C → D), shared with head
+        Returns:
+            (B, N, D)
+        """
+        B, N, D = query.shape
+        S, K    = self.n_scales, self.n_pts
+
+        q = query + query_pos   # inject position for offset / weight prediction
+
+        # Predict sampling offsets, bounded to ±0.5 in grid_sample space
+        offsets = self.offset_net(q).reshape(B, N, S, K, 2).tanh() * 0.5
+
+        # Predict normalised attention weights across all (scale, point) positions
+        attn_w = self.attn_net(q).reshape(B, N, self.n_heads, S * K)
+        attn_w = F.softmax(attn_w, dim=-1)                   # (B, N, n_heads, S*K)
+
+        # Build per-scale sampling points and clamp to valid grid range
+        ref        = reference_pts[:, :, None, None, :]      # (B, N, 1, 1, 2)
+        sample_pts = (ref + offsets).clamp(-1.0, 1.0)        # (B, N, S, K, 2)
+
+        # Sample and project features from each scale → cat to (B, N, S*K, D)
+        values_list = []
+        for s_idx, (scale, proj) in enumerate(zip(scales, kv_proj_list)):
+            pts   = sample_pts[:, :, s_idx, :, :].reshape(B, N * K, 1, 2)
+            feats = F.grid_sample(scale, pts, mode='bilinear',
+                                  padding_mode='border', align_corners=True)
+            # (B, C, N*K, 1) → (B, N, K, C)
+            feats = feats.squeeze(-1).permute(0, 2, 1).reshape(B, N, K, scale.shape[1])
+            values_list.append(proj(feats))                   # (B, N, K, D)
+        values = torch.cat(values_list, dim=2)                # (B, N, S*K, D)
+
+        # Multi-head weighted sum
+        # (B, N, S*K, n_heads, head_dim) → (B, N, n_heads, S*K, head_dim)
+        values = values.reshape(B, N, S * K, self.n_heads, self.head_dim)
+        values = values.permute(0, 1, 3, 2, 4)
+        # attn_w (B, N, n_heads, S*K) broadcast with values last dim
+        out = (attn_w.unsqueeze(-1) * values).sum(dim=3)     # (B, N, n_heads, head_dim)
+        out = self.drop(self.out_proj(out.reshape(B, N, D)))
+        return out
+
+
+class CenterFormerDeformableDecoderLayer(nn.Module):
+    """CenterFormer decoder layer with deformable cross-attention.
+
+    Self-attention (global among N proposals) and FFN are identical to
+    CenterFormerDecoderLayer; only the cross-attention step uses learned
+    sampling offsets instead of a fixed 3×3 window.
+
+    Paper deformable config: n_layers=2, n_heads=6, n_pts=15.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, ffn_dim: int,
+                 n_scales: int = 3, n_pts: int = 15, dropout: float = 0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout,
+                                               batch_first=True)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.drop1 = nn.Dropout(dropout)
+
+        self.deform_cross = DeformableCrossAttention(
+            d_model, n_heads, n_scales=n_scales, n_pts=n_pts, dropout=dropout)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.drop2 = nn.Dropout(dropout)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, ffn_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_dim, d_model),
+        )
+        self.norm3 = nn.LayerNorm(d_model)
+        self.drop3 = nn.Dropout(dropout)
+
+    def forward(self, query: torch.Tensor, scales: list,
+                reference_pts: torch.Tensor, query_pos: torch.Tensor,
+                kv_proj_list: nn.ModuleList) -> torch.Tensor:
+        """
+        Args:
+            query:         (B, N, D)
+            scales:        list of S (B, C, H_s, W_s) BEV feature maps
+            reference_pts: (B, N, 2)  grid_sample normalized coords [-1, 1]
+            query_pos:     (B, N, D)
+            kv_proj_list:  nn.ModuleList of S Linear(C → D)
+        Returns:
+            query: (B, N, D)
+        """
+        q_p = query + query_pos
+        sa_out, _ = self.self_attn(q_p, q_p, query)
+        query = self.norm1(query + self.drop1(sa_out))
+
+        ca_out = self.deform_cross(query, query_pos, reference_pts, scales, kv_proj_list)
+        query = self.norm2(query + self.drop2(ca_out))
+
+        query = self.norm3(query + self.drop3(self.ffn(query)))
+        return query
+
+
+# ---------------------------------------------------------------------------
 # CenterFormerHead
 # ---------------------------------------------------------------------------
 
@@ -186,10 +329,22 @@ class CenterFormerHead(nn.Module):
         self.kv_proj = nn.ModuleList([nn.Linear(cpn_ch, D) for _ in range(3)])
 
         # ── transformer decoder ───────────────────────────────────────────────
-        self.decoder_layers = nn.ModuleList([
-            CenterFormerDecoderLayer(D, n_heads, ffn_dim=D * 4, dropout=dropout)
-            for _ in range(n_layers)
-        ])
+        # DECODER_TYPE: 'standard' (fixed 3×3, paper base config)
+        #             or 'deformable' (K=15 learned offsets, paper Appendix B)
+        self.decoder_type = model_cfg.get('DECODER_TYPE', 'standard')
+        n_deform_pts      = model_cfg.get('NUM_DEFORMABLE_POINTS', 15)
+        if self.decoder_type == 'deformable':
+            self.decoder_layers = nn.ModuleList([
+                CenterFormerDeformableDecoderLayer(
+                    D, n_heads, ffn_dim=D * 4, n_scales=3,
+                    n_pts=n_deform_pts, dropout=dropout)
+                for _ in range(n_layers)
+            ])
+        else:
+            self.decoder_layers = nn.ModuleList([
+                CenterFormerDecoderLayer(D, n_heads, ffn_dim=D * 4, dropout=dropout)
+                for _ in range(n_layers)
+            ])
 
         # ── box regression head ───────────────────────────────────────────────
         sep_head_dict = copy.deepcopy(model_cfg.SEPARATE_HEAD_CFG.HEAD_DICT)
@@ -470,43 +625,46 @@ class CenterFormerHead(nn.Module):
 
     # ── query / kv construction ────────────────────────────────────────────────
 
-    def _build_query_and_kv(self, x_shared, proposals_pixel, scales):
-        """
+    def _build_query(self, x_shared, proposals_pixel):
+        """Build query tokens and position embeddings (common to both decoder types).
+
         Args:
-            x_shared:       (B, shared_ch, H, W)
-            proposals_pixel:(B, N, 2)  float pixel coords at heatmap res
-            scales:         list of 3 tensors [(B, C, H0, W0), ...]
+            x_shared:        (B, shared_ch, H, W)
+            proposals_pixel: (B, N, 2)  float pixel coords at heatmap resolution
         Returns:
             query:    (B, N, D)
             query_pos:(B, N, D)
-            local_kv: (B, N, S*9, D)
+            ctrs_norm:(B, N, 2)  grid_sample coords [-1, 1] (valid for all scales)
         """
         B, N = proposals_pixel.shape[:2]
         H_hm, W_hm = x_shared.shape[2], x_shared.shape[3]
 
-        # Normalized coords for grid_sample (same spatial extent for all scales)
-        ctrs_norm = self._pixel_to_gridsample_norm(proposals_pixel, H_hm, W_hm)  # (B,N,2)
+        ctrs_norm  = self._pixel_to_gridsample_norm(proposals_pixel, H_hm, W_hm)
+        q_raw      = gather_bev_features(x_shared, ctrs_norm, radius=0)  # (B, N, shared_ch)
+        query      = self.query_proj(q_raw)                               # (B, N, D)
 
-        # Query features: point-sample from shared BEV feature
-        q_raw  = gather_bev_features(x_shared, ctrs_norm, radius=0)  # (B, N, shared_ch)
-        query  = self.query_proj(q_raw)                               # (B, N, D)
+        ctrs_world = self._pixel_to_pos_embed_norm(proposals_pixel)       # (B, N, 2)
+        query_pos  = self.pos_embed(ctrs_world.reshape(B * N, 2))
+        query_pos  = query_pos.reshape(B, N, -1)                          # (B, N, D)
 
-        # Position embedding from world-normalized coords
-        ctrs_world = self._pixel_to_pos_embed_norm(proposals_pixel)   # (B, N, 2)
-        query_pos  = self.pos_embed(ctrs_world.reshape(B * N, 2))     # (B*N, D)
-        query_pos  = query_pos.reshape(B, N, -1)                      # (B, N, D)
+        return query, query_pos, ctrs_norm
 
-        # Multi-scale K/V: 3×3 patch from each scale → project to D
+    def _build_local_kv(self, ctrs_norm, scales):
+        """Standard decoder: pre-sample fixed 3×3 patches from each BEV scale.
+
+        Args:
+            ctrs_norm: (B, N, 2)  grid_sample coords (shared across all scales)
+            scales:    list of 3 (B, C, H_s, W_s)
+        Returns:
+            local_kv:  (B, N, 27, D)   (3 scales × 9 points each)
+        """
+        B, N    = ctrs_norm.shape[:2]
         kv_list = []
         for s_idx, scale in enumerate(scales):
             raw = gather_bev_features(scale, ctrs_norm, radius=1)     # (B, N, C*9)
-            C   = scale.shape[1]
-            raw = raw.reshape(B, N, 9, C)                             # (B, N, 9, C)
-            kv  = self.kv_proj[s_idx](raw)                            # (B, N, 9, D)
-            kv_list.append(kv)
-        local_kv = torch.cat(kv_list, dim=2)                          # (B, N, 27, D)
-
-        return query, query_pos, local_kv
+            raw = raw.reshape(B, N, 9, scale.shape[1])                # (B, N, 9, C)
+            kv_list.append(self.kv_proj[s_idx](raw))                  # (B, N, 9, D)
+        return torch.cat(kv_list, dim=2)                              # (B, N, 27, D)
 
     # ── box prediction decode (inference) ─────────────────────────────────────
 
@@ -639,13 +797,17 @@ class CenterFormerHead(nn.Module):
         else:
             proposals = self._build_infer_proposals(hm_all_sig.detach())
 
-        # ── query + K/V construction ─────────────────────────────────────────
-        query, query_pos, local_kv = self._build_query_and_kv(
-            x_shared, proposals, scales)
+        # ── query construction (common to both decoder types) ────────────────
+        query, query_pos, ctrs_norm = self._build_query(x_shared, proposals)
 
         # ── decoder ──────────────────────────────────────────────────────────
-        for layer in self.decoder_layers:
-            query = layer(query, local_kv, query_pos)          # (B, N, D)
+        if self.decoder_type == 'deformable':
+            for layer in self.decoder_layers:
+                query = layer(query, scales, ctrs_norm, query_pos, self.kv_proj)
+        else:
+            local_kv = self._build_local_kv(ctrs_norm, scales)
+            for layer in self.decoder_layers:
+                query = layer(query, local_kv, query_pos)      # (B, N, D)
 
         # ── box head ─────────────────────────────────────────────────────────
         box_preds = self.box_head(query.transpose(1, 2))       # dict of (B, out_ch, N)
