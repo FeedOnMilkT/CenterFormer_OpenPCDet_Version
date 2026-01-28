@@ -1,0 +1,110 @@
+# CenterFormer mini-NuScenes pipeline-verification config.
+# Goal: confirm end-to-end forward/backward pass runs without error.
+# Accuracy on mini split is not meaningful — do not compare numbers.
+
+CLASS_NAMES: ['car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+              'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/nuscenes_dataset_mini.yaml
+    POINT_CLOUD_RANGE: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+
+MODEL:
+    NAME: CenterFormer
+
+    VFE:
+        NAME: MeanVFE
+
+    BACKBONE_3D:
+        NAME: VoxelResBackBone8x
+
+    MAP_TO_BEV:
+        NAME: HeightCompression
+        NUM_BEV_FEATURES: 256
+
+    # CenterFormerCPN replaces the standard BEV backbone.
+    # NUM_FILTERS must match CPN_NUM_FILTERS in DENSE_HEAD.
+    BACKBONE_2D:
+        NAME: CenterFormerCPN
+        NUM_FILTERS: 128
+
+    DENSE_HEAD:
+        NAME: CenterFormerHead
+        CLASS_AGNOSTIC: False
+
+        # Reduced for fast pipeline check
+        NUM_PROPOSALS: 64
+        HIDDEN_CHANNEL: 128       # D — must be divisible by NUM_HEADS
+        NUM_HEADS: 4              # head_dim = 128/4 = 32
+        NUM_DECODER_LAYERS: 3
+        DROPOUT: 0.1
+        DECODER_TYPE: standard    # 'standard' | 'deformable'
+        NUM_DEFORMABLE_POINTS: 15 # only used when DECODER_TYPE=deformable
+
+        SHARED_CONV_CHANNEL: 64
+        USE_BIAS_BEFORE_NORM: False
+
+        CLASS_NAMES_EACH_HEAD: [
+            ['car'],
+            ['truck', 'construction_vehicle'],
+            ['bus', 'trailer'],
+            ['barrier'],
+            ['motorcycle', 'bicycle'],
+            ['pedestrian', 'traffic_cone'],
+        ]
+
+        SEPARATE_HEAD_CFG:
+            # Order must match _encode_gt_boxes: dx,dy | z | log_w,l,h | cos,sin | vx,vy
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot', 'vel']
+            HEAD_DICT: {
+                'center':   {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim':      {'out_channels': 3, 'num_conv': 2},
+                'rot':      {'out_channels': 2, 'num_conv': 2},
+                'vel':      {'out_channels': 2, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            # CPN outputs stride-4 feature map (2× upsample from VoxelResBackBone8x stride-8)
+            FEATURE_MAP_STRIDE: 4
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 2.0,
+                # [dx, dy, z, log_w, log_l, log_h, cos, sin, vx, vy]
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2, 1.0, 1.0]
+            }
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.1
+            POST_CENTER_LIMIT_RANGE: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+        EVAL_METRIC: kitti
+
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 16
+    NUM_EPOCHS: 2
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.001
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: False
+    WARMUP_EPOCH: 1
+
+    GRAD_NORM_CLIP: 10
