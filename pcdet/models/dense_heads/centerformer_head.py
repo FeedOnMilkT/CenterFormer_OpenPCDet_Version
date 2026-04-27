@@ -287,7 +287,6 @@ class CenterFormerHead(nn.Module):
         n_layers = model_cfg.NUM_DECODER_LAYERS
         dropout  = model_cfg.get('DROPOUT', 0.1)
         self.num_proposals = model_cfg.NUM_PROPOSALS
-        cpn_ch   = model_cfg.CPN_NUM_FILTERS   # channels from CenterFormerCPN
 
         # ── class name book-keeping (same pattern as CenterHead) ──────────────
         self.class_names = class_names
@@ -325,8 +324,8 @@ class CenterFormerHead(nn.Module):
         self.query_proj = nn.Linear(shared_ch, D)
         self.pos_embed  = CenterFormerPositionEmbedding(D)   # learnable, 2→D
 
-        # ── K/V projection per scale (C channels per keypoint, 9 keypoints) ──
-        self.kv_proj = nn.ModuleList([nn.Linear(cpn_ch, D) for _ in range(3)])
+        # ── K/V projection per scale (input_channels = backbone_2d output channels) ──
+        self.kv_proj = nn.ModuleList([nn.Linear(input_channels, D) for _ in range(3)])
 
         # ── transformer decoder ───────────────────────────────────────────────
         # DECODER_TYPE: 'standard' (fixed 3×3, paper base config)
