@@ -1,38 +1,50 @@
 # Installation
 
-### Requirements
-All the codes are tested in the following environment:
-* Linux (tested on Ubuntu 14.04/16.04/18.04/20.04/21.04)
-* Python 3.6+
-* PyTorch 1.1 or higher (tested on PyTorch 1.1, 1,3, 1,5~1.10)
-* CUDA 9.0 or higher (PyTorch 1.3+ needs CUDA 9.2+)
-* [`spconv v1.0 (commit 8da6f96)`](https://github.com/traveller59/spconv/tree/8da6f967fb9a054d8870c3515b1b44eca2103634) or [`spconv v1.2`](https://github.com/traveller59/spconv) or [`spconv v2.x`](https://github.com/traveller59/spconv)
+## Environment
 
+Tested on:
 
-### Install `pcdet v0.5`
-NOTE: Please re-install `pcdet v0.5` by running `python setup.py develop` even if you have already installed previous version.
+| Component | Version |
+|-----------|---------|
+| OS | Ubuntu 20.04 / 22.04 |
+| Python | 3.8 – 3.10 |
+| PyTorch | 2.0+ |
+| CUDA | 11.6 / 11.7 / 11.8 |
+| spconv | v2.x (`spconv-cu116` / `spconv-cu117` / `spconv-cu118`) |
+| nuscenes-devkit | 1.0.5 |
 
-a. Clone this repository.
-```shell
-git clone https://github.com/open-mmlab/OpenPCDet.git
+---
+
+## Step 1 — Clone
+
+```bash
+git clone https://github.com/FeedOnMilkT/CenterFormer_OpenPCDet_Version.git
+cd CenterFormer_OpenPCDet_Version
 ```
 
-b. Install the dependent libraries as follows:
+## Step 2 — Install dependencies
 
-[comment]: <> (* Install the dependent python libraries: )
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install spconv-cu118          # match your CUDA version
+pip install nuscenes-devkit==1.0.5
+pip install -r requirements.txt
+```
 
-[comment]: <> (```)
+## Step 3 — Build pcdet
 
-[comment]: <> (pip install -r requirements.txt )
-
-[comment]: <> (```)
-
-* Install the SparseConv library, we use the implementation from [`[spconv]`](https://github.com/traveller59/spconv). 
-    * If you use PyTorch 1.1, then make sure you install the `spconv v1.0` with ([commit 8da6f96](https://github.com/traveller59/spconv/tree/8da6f967fb9a054d8870c3515b1b44eca2103634)) instead of the latest one.
-    * If you use PyTorch 1.3+, then you need to install the `spconv v1.2`. As mentioned by the author of [`spconv`](https://github.com/traveller59/spconv), you need to use their docker if you use PyTorch 1.4+. 
-    * You could also install latest `spconv v2.x` with pip, see the official documents of [spconv](https://github.com/traveller59/spconv).
-  
-c. Install this `pcdet` library and its dependent libraries by running the following command:
-```shell
+```bash
 python setup.py develop
+```
+
+## Step 4 — Verify CUDA ops
+
+```bash
+python -c "from pcdet.ops.iou3d_nms import iou3d_nms_utils; print('ops OK')"
+```
+
+If this fails, rebuild with:
+
+```bash
+cd pcdet/ops && python setup.py build_ext --inplace && cd ../..
 ```
