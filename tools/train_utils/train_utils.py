@@ -34,7 +34,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         except StopIteration:
             dataloader_iter = iter(train_loader)
             batch = next(dataloader_iter)
-            print('new iters')
+            if logger is not None and rank == 0:
+                logger.info('Rebuilding dataloader iterator')
         
         data_timer = time.time()
         cur_data_time = data_timer - end
@@ -85,6 +86,21 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                 'loss': loss.item(), 'lr': cur_lr, 'd_time': f'{data_time.val:.2f}({data_time.avg:.2f})',
                 'f_time': f'{forward_time.val:.2f}({forward_time.avg:.2f})', 'b_time': f'{batch_time.val:.2f}({batch_time.avg:.2f})'
             })
+
+            pbar.update()
+            pbar.set_postfix({
+                'it': accumulated_iter,
+                'loss': f'{losses_m.val:.3g}',
+                'lr': f'{cur_lr:.2e}',
+                'data': f'{data_time.val:.2f}s',
+                'fwd': f'{forward_time.val:.2f}s',
+                'batch': f'{batch_time.val:.2f}s',
+            })
+            tbar.set_postfix({
+                'loss': f'{losses_m.avg:.3g}',
+                'lr': f'{cur_lr:.2e}',
+                'batch': f'{batch_time.avg:.2f}s'
+            })
             
             if use_logger_to_record:
                 if accumulated_iter % logger_iter_interval == 0 or cur_it == start_it or cur_it + 1 == total_it_each_epoch:
@@ -120,11 +136,6 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                         # To show the GPU utilization, please install gpustat through "pip install gpustat"
                         gpu_info = os.popen('gpustat').read()
                         logger.info(gpu_info)
-            else:                
-                pbar.update()
-                pbar.set_postfix(dict(total_it=accumulated_iter))
-                tbar.set_postfix(disp_dict)
-                # tbar.refresh()
 
             if tb_log is not None:
                 tb_log.add_scalar('train/loss', loss, accumulated_iter)

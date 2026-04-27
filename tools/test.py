@@ -29,7 +29,7 @@ def parse_config():
     parser.add_argument('--pretrained_model', type=str, default=None, help='pretrained_model')
     parser.add_argument('--launcher', choices=['none', 'pytorch', 'slurm'], default='none')
     parser.add_argument('--tcp_port', type=int, default=18888, help='tcp port for distrbuted training')
-    parser.add_argument('--local_rank', type=int, default=None, help='local rank for distributed training')
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', type=int, default=None, help='local rank for distributed training')
     parser.add_argument('--set', dest='set_cfgs', default=None, nargs=argparse.REMAINDER,
                         help='set extra config keys if needed')
 
@@ -89,18 +89,28 @@ def get_no_evaluated_ckpt(ckpt_dir, ckpt_record_file, args):
 def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir, dist_test=False):
     # evaluated ckpt record
     ckpt_record_file = eval_output_dir / ('eval_list_%s.txt' % cfg.DATA_CONFIG.DATA_SPLIT['test'])
-    with open(ckpt_record_file, 'a'):
-        pass
+    if cfg.LOCAL_RANK == 0:
+        with open(ckpt_record_file, 'a'):
+            pass
 
     # tensorboard log
+    tb_log = None
     if cfg.LOCAL_RANK == 0:
         tb_log = SummaryWriter(log_dir=str(eval_output_dir / ('tensorboard_%s' % cfg.DATA_CONFIG.DATA_SPLIT['test'])))
     total_time = 0
     first_eval = True
 
     while True:
-        # check whether there is checkpoint which is not evaluated
-        cur_epoch_id, cur_ckpt = get_no_evaluated_ckpt(ckpt_dir, ckpt_record_file, args)
+        if cfg.LOCAL_RANK == 0:
+            cur_epoch_id, cur_ckpt = get_no_evaluated_ckpt(ckpt_dir, ckpt_record_file, args)
+        else:
+            cur_epoch_id, cur_ckpt = -1, None
+
+        if dist_test:
+            sync_payload = [cur_epoch_id, cur_ckpt]
+            torch.distributed.broadcast_object_list(sync_payload, src=0)
+            cur_epoch_id, cur_ckpt = sync_payload
+
         if cur_epoch_id == -1 or int(float(cur_epoch_id)) < args.start_epoch:
             wait_second = 30
             if cfg.LOCAL_RANK == 0:
@@ -130,9 +140,10 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
                 tb_log.add_scalar(key, val, cur_epoch_id)
 
         # record this epoch which has been evaluated
-        with open(ckpt_record_file, 'a') as f:
-            print('%s' % cur_epoch_id, file=f)
-        logger.info('Epoch %s has been evaluated' % cur_epoch_id)
+        if cfg.LOCAL_RANK == 0:
+            with open(ckpt_record_file, 'a') as f:
+                print('%s' % cur_epoch_id, file=f)
+            logger.info('Epoch %s has been evaluated' % cur_epoch_id)
 
 
 def main():

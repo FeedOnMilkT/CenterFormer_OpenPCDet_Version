@@ -8,8 +8,16 @@ from tqdm import tqdm
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 from ...utils import common_utils
 from ..dataset import DatasetTemplate
-from pyquaternion import Quaternion
-from PIL import Image
+
+try:
+    from pyquaternion import Quaternion
+except ImportError:
+    Quaternion = None
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 
 class NuScenesDataset(DatasetTemplate):
@@ -25,6 +33,9 @@ class NuScenesDataset(DatasetTemplate):
             self.camera_image_config = self.camera_config.IMAGE
         else:
             self.use_camera = False
+
+        if self.use_camera and (Quaternion is None or Image is None):
+            raise ImportError('Camera-enabled NuScenes paths require pyquaternion and Pillow')
 
         self.include_nuscenes_data(self.mode)
         if self.training and self.dataset_cfg.get('BALANCED_RESAMPLING', False):
@@ -153,6 +164,8 @@ class NuScenesDataset(DatasetTemplate):
         return input_dict
     
     def load_camera_info(self, input_dict, info):
+        if Quaternion is None or Image is None:
+            raise ImportError('Camera-enabled NuScenes paths require pyquaternion and Pillow')
         input_dict["image_paths"] = []
         input_dict["lidar2camera"] = []
         input_dict["lidar2image"] = []
@@ -257,6 +270,8 @@ class NuScenesDataset(DatasetTemplate):
         import json
         from nuscenes.nuscenes import NuScenes
         from . import nuscenes_utils
+
+        num_pred_boxes = sum(len(det.get('name', [])) for det in det_annos)
         nusc = NuScenes(version=self.dataset_cfg.VERSION, dataroot=str(self.root_path), verbose=True)
         nusc_annos = nuscenes_utils.transform_det_annos_to_nusc_annos(det_annos, nusc)
         nusc_annos['meta'] = {
@@ -277,6 +292,14 @@ class NuScenesDataset(DatasetTemplate):
 
         if self.dataset_cfg.VERSION == 'v1.0-test':
             return 'No ground-truth annotations for evaluation', {}
+
+        if num_pred_boxes == 0:
+            result_str = 'No predicted boxes were generated; skipping nuScenes evaluation.'
+            result_dict = {
+                'mean_ap': 0.0,
+                'nd_score': 0.0,
+            }
+            return result_str, result_dict
 
         from nuscenes.eval.detection.config import config_factory
         from nuscenes.eval.detection.evaluate import NuScenesEval

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Thin helper around torchrun for single-node DDP.
 set -x
 NGPUS=$1
 PY_ARGS=${@:2}
@@ -14,5 +15,4 @@ do
 done
 echo $PORT
 
-python -m torch.distributed.launch --nproc_per_node=${NGPUS} --rdzv_endpoint=localhost:${PORT} train.py --launcher pytorch ${PY_ARGS}
-
+torchrun --standalone --nnodes=1 --nproc_per_node=${NGPUS} --master_port=${PORT} train.py --launcher pytorch ${PY_ARGS}

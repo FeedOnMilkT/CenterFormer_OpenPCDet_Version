@@ -6,26 +6,11 @@ from torch.utils.data import DistributedSampler as _DistributedSampler
 from pcdet.utils import common_utils
 
 from .dataset import DatasetTemplate
-
-# from .kitti.kitti_dataset import KittiDataset
 from .nuscenes.nuscenes_dataset import NuScenesDataset
-# from .waymo.waymo_dataset import WaymoDataset
-# from .pandaset.pandaset_dataset import PandasetDataset
-# from .lyft.lyft_dataset import LyftDataset
-# from .once.once_dataset import ONCEDataset
-# from .argo2.argo2_dataset import Argo2Dataset
-# from .custom.custom_dataset import CustomDataset
 
 __all__ = {
     'DatasetTemplate': DatasetTemplate,
-    # 'KittiDataset': KittiDataset,
     'NuScenesDataset': NuScenesDataset,
-    # 'WaymoDataset': WaymoDataset,
-    # 'PandasetDataset': PandasetDataset,
-    # 'LyftDataset': LyftDataset,
-    # 'ONCEDataset': ONCEDataset,
-    # 'CustomDataset': CustomDataset,
-    # 'Argo2Dataset': Argo2Dataset
 }
 
 
@@ -67,18 +52,22 @@ def build_dataloader(dataset_cfg, class_names, batch_size, dist, root_path=None,
         assert hasattr(dataset, 'merge_all_iters_to_one_epoch')
         dataset.merge_all_iters_to_one_epoch(merge=True, epochs=total_epochs)
 
+    rank, world_size = common_utils.get_dist_info()
+
     if dist:
         if training:
-            sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=seed or 0
+            )
         else:
-            rank, world_size = common_utils.get_dist_info()
             sampler = DistributedSampler(dataset, world_size, rank, shuffle=False)
     else:
         sampler = None
     dataloader = DataLoader(
         dataset, batch_size=batch_size, pin_memory=True, num_workers=workers,
         shuffle=(sampler is None) and training, collate_fn=dataset.collate_batch,
-        drop_last=False, sampler=sampler, timeout=0, worker_init_fn=partial(common_utils.worker_init_fn, seed=seed)
+        drop_last=False, sampler=sampler, timeout=0,
+        worker_init_fn=partial(common_utils.worker_init_fn, seed=seed, rank=rank, num_workers=workers)
     )
 
     return dataset, dataloader, sampler

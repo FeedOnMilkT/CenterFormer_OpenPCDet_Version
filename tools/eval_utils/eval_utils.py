@@ -48,6 +48,7 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         model = torch.nn.parallel.DistributedDataParallel(
                 model,
                 device_ids=[local_rank],
+                output_device=local_rank,
                 broadcast_buffers=False
         )
     model.eval()

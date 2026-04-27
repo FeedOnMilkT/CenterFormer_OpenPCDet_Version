@@ -1,8 +1,13 @@
 import numpy as np
-import scipy
 import torch
 import copy
-from scipy.spatial import Delaunay
+
+try:
+    import scipy
+    from scipy.spatial import Delaunay
+except Exception:
+    scipy = None
+    Delaunay = None
 
 from ..ops.roiaware_pool3d import roiaware_pool3d_utils
 from . import common_utils
@@ -14,6 +19,8 @@ def in_hull(p, hull):
     :param hull: (M, K) M corners of a box
     :return (N) bool
     """
+    if Delaunay is None or scipy is None:
+        raise ImportError('SciPy with a compatible NumPy build is required for in_hull')
     try:
         if not isinstance(hull, Delaunay):
             hull = Delaunay(hull)

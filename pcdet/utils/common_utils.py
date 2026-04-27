@@ -4,7 +4,11 @@ import pickle
 import random
 import shutil
 import subprocess
-import SharedArray
+
+try:
+    import SharedArray
+except ImportError:
+    SharedArray = None
 
 import numpy as np
 import torch
@@ -126,13 +130,14 @@ def set_random_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def worker_init_fn(worker_id, seed=666):
+def worker_init_fn(worker_id, seed=666, rank=0, num_workers=1):
     if seed is not None:
-        random.seed(seed + worker_id)
-        np.random.seed(seed + worker_id)
-        torch.manual_seed(seed + worker_id)
-        torch.cuda.manual_seed(seed + worker_id)
-        torch.cuda.manual_seed_all(seed + worker_id)
+        worker_seed = seed + rank * max(num_workers, 1) + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+        torch.cuda.manual_seed(worker_seed)
+        torch.cuda.manual_seed_all(worker_seed)
 
 
 def get_pad_params(desired_size, cur_size):
@@ -187,26 +192,20 @@ def init_dist_slurm(tcp_port, local_rank, backend='nccl'):
 
 
 def init_dist_pytorch(tcp_port, local_rank, backend='nccl'):
-    # Un-commenting mp spawn below will lead to high variance in GPU usage across devices
-    # Also, dataloader initialization will lead to huge GPU:0 usage
-    # Because only one of torch.distributed.launch OR torch.multiprocessing
-    # is needed for correctly scheduling multi-gpu training. dist_train.sh already uses the former
-    # if mp.get_start_method(allow_none=True) is None:
-    #     mp.set_start_method('spawn')
+    if local_rank is None:
+        local_rank = int(os.environ['LOCAL_RANK'])
 
-    # os.environ['MASTER_PORT'] = str(tcp_port)
-    # os.environ['MASTER_ADDR'] = 'localhost'
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(local_rank % num_gpus)
+    os.environ.setdefault('MASTER_PORT', str(tcp_port))
+    os.environ.setdefault('MASTER_ADDR', '127.0.0.1')
+    torch.cuda.set_device(local_rank)
 
     dist.init_process_group(
         backend=backend,
-        # init_method='tcp://127.0.0.1:%d' % tcp_port,
-        # rank=local_rank,
-        # world_size=num_gpus
+        init_method='env://'
     )
+    world_size = dist.get_world_size()
     rank = dist.get_rank()
-    return num_gpus, rank
+    return world_size, rank
 
 
 def get_dist_info(return_gpu_per_machine=False):
@@ -276,6 +275,8 @@ def generate_voxel2pinds(sparse_tensor):
 
 
 def sa_create(name, var):
+    if SharedArray is None:
+        raise ImportError('SharedArray is required for shared-memory dataset caching')
     x = SharedArray.create(name, var.shape, dtype=var.dtype)
     x[...] = var[...]
     x.flags.writeable = False

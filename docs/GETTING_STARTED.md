@@ -65,9 +65,9 @@ Confirms the end-to-end pipeline runs without error. Accuracy on mini is not mea
 ```bash
 python train.py \
     --cfg_file cfgs/nuscenes_models/centerformer_nuscenes_mini.yaml \
-    --batch_size 2 \
-    --workers 2 \
-    --extra_tag mini_smoke_test \
+    --batch_size 8 \
+    --workers 4 \
+    --extra_tag mini_smoke_test_v3 \
     --fix_random_seed
 ```
 
@@ -87,12 +87,27 @@ python train.py \
 ```bash
 python train.py \
     --cfg_file cfgs/nuscenes_models/centerformer_nuscenes.yaml \
-    --batch_size 4 \
+    --batch_size 16 \
     --workers 4 \
     --extra_tag full_train_v1
 ```
 
-### Full training — multi-GPU (recommended, 4 × GPU)
+### Full training — multi-GPU (recommended, single node, 4 × GPU)
+
+You can launch single-node DDP either directly with `torchrun` or via the helper script. Both are recommended.
+
+#### Option A — direct `torchrun`
+
+```bash
+torchrun --standalone --nnodes=1 --nproc_per_node=4 train.py \
+    --launcher pytorch \
+    --cfg_file cfgs/nuscenes_models/centerformer_nuscenes.yaml \
+    --batch_size 16 \
+    --workers 4 \
+    --extra_tag full_train_v1
+```
+
+#### Option B — helper script
 
 ```bash
 bash scripts/dist_train.sh 4 \
@@ -101,6 +116,8 @@ bash scripts/dist_train.sh 4 \
     --workers 4 \
     --extra_tag full_train_v1
 ```
+
+`dist_train.sh` is a thin wrapper around `torchrun` that auto-selects a free local port.
 
 ### Deformable decoder variant
 

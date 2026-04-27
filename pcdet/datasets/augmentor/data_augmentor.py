@@ -1,7 +1,11 @@
 from functools import partial
 
 import numpy as np
-from PIL import Image
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 from ...utils import common_utils
 from . import augmentor_utils, database_sampler
@@ -268,6 +272,8 @@ class DataAugmentor(object):
     def imgaug(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.imgaug, config=config)
+        if Image is None:
+            raise ImportError('Pillow is required for image augmentation paths')
         imgs = data_dict["camera_imgs"]
         img_process_infos = data_dict['img_process_infos']
         new_imgs = []

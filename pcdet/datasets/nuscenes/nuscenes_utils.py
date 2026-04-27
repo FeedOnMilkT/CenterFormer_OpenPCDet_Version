@@ -514,6 +514,9 @@ def transform_det_annos_to_nusc_annos(det_annos, nusc):
         'meta': None,
     }
 
+    non_empty_results = []
+    empty_results = []
+
     for det in det_annos:
         annos = []
         box_list = boxes_lidar_to_nusenes(det)
@@ -551,7 +554,16 @@ def transform_det_annos_to_nusc_annos(det_annos, nusc):
             }
             annos.append(nusc_anno)
 
-        nusc_annos['results'].update({det["metadata"]["token"]: annos})
+        result_item = (det["metadata"]["token"], annos)
+        if annos:
+            non_empty_results.append(result_item)
+        else:
+            empty_results.append(result_item)
+
+    # The official nuScenes devkit infers box type from the first sample entry
+    # and crashes if that entry contains an empty prediction list.
+    for token, annos in non_empty_results + empty_results:
+        nusc_annos['results'][token] = annos
 
     return nusc_annos
 
