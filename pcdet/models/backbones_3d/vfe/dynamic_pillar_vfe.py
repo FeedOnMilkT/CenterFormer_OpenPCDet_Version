@@ -4,9 +4,25 @@ import torch.nn.functional as F
 
 try:
     import torch_scatter
-except Exception as e:
-    # Incase someone doesn't want to use dynamic pillar vfe and hasn't installed torch_scatter
-    pass
+    _USE_TORCH_SCATTER = True
+except Exception:
+    _USE_TORCH_SCATTER = False
+
+
+def _scatter_max(src, index, dim_size):
+    if _USE_TORCH_SCATTER:
+        return torch_scatter.scatter_max(src, index, dim=0, dim_size=dim_size)[0]
+    out = torch.full((dim_size, src.shape[1]), float('-inf'), dtype=src.dtype, device=src.device)
+    out.scatter_reduce_(0, index.unsqueeze(1).expand_as(src), src, reduce='amax', include_self=True)
+    return out
+
+
+def _scatter_mean(src, index, dim_size):
+    if _USE_TORCH_SCATTER:
+        return torch_scatter.scatter_mean(src, index, dim=0, dim_size=dim_size)
+    out = torch.zeros(dim_size, src.shape[1], dtype=src.dtype, device=src.device)
+    out.scatter_reduce_(0, index.unsqueeze(1).expand_as(src), src, reduce='mean', include_self=False)
+    return out
 
 from .vfe_template import VFETemplate
 
@@ -37,7 +53,7 @@ class PFNLayerV2(nn.Module):
         x = self.linear(inputs)
         x = self.norm(x) if self.use_norm else x
         x = self.relu(x)
-        x_max = torch_scatter.scatter_max(x, unq_inv, dim=0)[0]
+        x_max = _scatter_max(x, unq_inv, dim_size=unq_inv.max().item() + 1)
 
         if self.last_vfe:
             return x_max
@@ -102,7 +118,7 @@ class DynamicPillarVFE(VFETemplate):
         
         unq_coords, unq_inv, unq_cnt = torch.unique(merge_coords, return_inverse=True, return_counts=True, dim=0)
 
-        points_mean = torch_scatter.scatter_mean(points_xyz, unq_inv, dim=0)
+        points_mean = _scatter_mean(points_xyz, unq_inv, dim_size=unq_coords.shape[0])
         f_cluster = points_xyz - points_mean[unq_inv, :]
 
         f_center = torch.zeros_like(points_xyz)
